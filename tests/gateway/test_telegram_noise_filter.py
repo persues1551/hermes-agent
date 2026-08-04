@@ -148,6 +148,19 @@ def test_programmatic_surfaces_keep_fallback_switch_notice():
         )
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "I switched to fallback modeling for this forecast.",
+        "The service switched to fallback model selection mode.",
+    ],
+)
+def test_chat_gateways_keep_non_fallback_status_messages(message):
+    """Only the fixed Hermes fallback notice format is routine gateway noise."""
+    for platform in CHAT_PLATFORMS:
+        assert _prepare_gateway_status_message(platform, "lifecycle", message) == message
+
+
 @pytest.mark.parametrize("message", ["still on it", "⏳ Working — 3 min"])
 def test_telegram_status_keeps_legitimate_heartbeat_messages(message):
     """The compression filter must not swallow user-facing work heartbeats."""
