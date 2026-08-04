@@ -36,6 +36,7 @@ NOISY_STATUS_MESSAGES = [
     "⚠ Compression summary failed: upstream error. Inserted a fallback context marker.",
     "⏱️ Rate limited. Waiting 30.0s (attempt 2/3)...",
     "⏳ Retrying in 4.2s (attempt 1/3)...",
+    "🔄 Switched to fallback model: gpt-5.6-terra via custom → deepseek-v4-pro via deepseek",
     # Buffered overflow/attempt-cap retry chatter (replayed on retry exhaustion).
     "🗜️ Context too large (~250,000 tokens) — compressing (1/3)...",
     "🗜️ Compressed 30 → 12 messages, retrying...",
@@ -127,6 +128,19 @@ def test_programmatic_surfaces_keep_raw_status():
     CLI/TUI diagnostics, API JSON, or webhook payloads.
     """
     message = "⏳ Retrying in 4.2s (attempt 1/3)..."
+
+    for platform in ("local", "api_server", "webhook", "msgraph_webhook"):
+        assert (
+            _prepare_gateway_status_message(platform, "lifecycle", message) == message
+        )
+
+
+def test_programmatic_surfaces_keep_fallback_switch_notice():
+    """Operators using local/API surfaces still receive provider failover diagnostics."""
+    message = (
+        "🔄 Switched to fallback model: gpt-5.6-terra via custom "
+        "→ deepseek-v4-pro via deepseek"
+    )
 
     for platform in ("local", "api_server", "webhook", "msgraph_webhook"):
         assert (
