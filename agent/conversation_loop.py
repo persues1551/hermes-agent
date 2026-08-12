@@ -328,6 +328,20 @@ def _is_stale_copilot_credential_error(status_code: Optional[int], error_message
     )
 
 
+def _should_defer_to_copilot_credential_recovery(
+    agent: Any,
+    recovery_already_attempted: bool,
+    status_code: Optional[int],
+    error_message: str,
+) -> bool:
+    """Keep stale Copilot 400s on the same provider for one recovery attempt."""
+    return (
+        _is_copilot_provider(agent)
+        and not recovery_already_attempted
+        and _is_stale_copilot_credential_error(status_code, error_message)
+    )
+
+
 def _image_error_max_dimension(error: Exception) -> Optional[int]:
     """Extract a provider-reported image dimension ceiling, if present."""
     parts = []
@@ -408,6 +422,14 @@ def _ra():
     """
     import run_agent
     return run_agent
+
+
+def _credential_pool_may_recover_from_fallback_reason(reason, pool) -> bool:
+    """Use the credential-pool guard only for account-level rate limits."""
+    return (
+        reason == FailoverReason.rate_limit
+        and _ra()._pool_may_recover_from_rate_limit(pool)
+    )
 
 
 def _nous_entitlement_message(capability: str) -> str:
@@ -4810,10 +4832,17 @@ def run_conversation(
                 )
                 if _is_zai_coding_overload:
                     max_retries = max(max_retries, zai_coding_overload_retry_ceiling())
+                _defer_to_copilot_recovery = _should_defer_to_copilot_credential_recovery(
+                    agent,
+                    _retry.copilot_stale_cred_retry_attempted,
+                    status_code,
+                    str(getattr(api_error, "message", "") or api_error),
+                )
                 _should_fallback = (
                     is_rate_limited
                     or (_is_transport_failure and retry_count >= 2)
-                )
+                    or classified.should_fallback
+                ) and not _defer_to_copilot_recovery
                 if _should_fallback and agent._fallback_index < len(agent._fallback_chain):
                     # Don't eagerly fallback if credential pool rotation may
                     # still recover.  See _pool_may_recover_from_rate_limit
@@ -4824,11 +4853,9 @@ def run_conversation(
                     # etc.) is throttling OpenRouter, so always fall back to a
                     # different model regardless of pool state.
                     _is_upstream = classified.reason == FailoverReason.upstream_rate_limit
-                    pool_may_recover = (
-                        False if _is_upstream
-                        else _ra()._pool_may_recover_from_rate_limit(
-                            agent._credential_pool,
-                        )
+                    pool_may_recover = _credential_pool_may_recover_from_fallback_reason(
+                        classified.reason,
+                        agent._credential_pool,
                     )
                     if not pool_may_recover:
                         if _is_upstream:
@@ -4842,6 +4869,10 @@ def run_conversation(
                         elif classified.reason == FailoverReason.billing:
                             agent._buffer_status(
                                 "⚠️ Billing or credits exhausted — switching to fallback provider..."
+                            )
+                        elif classified.reason == FailoverReason.server_error:
+                            agent._buffer_status(
+                                "⚠️ Upstream server error — switching to fallback provider..."
                             )
                         elif _is_transport_failure:
                             agent._buffer_status(
@@ -5461,13 +5492,7 @@ def run_conversation(
                     # Single-shot guard prevents looping on a genuinely
                     # unavailable model. Copilot-scoped so other providers'
                     # real 400s are untouched.
-                    if (
-                        _is_copilot_provider(agent)
-                        and not _retry.copilot_stale_cred_retry_attempted
-                        and _is_stale_copilot_credential_error(
-                            status_code, str(getattr(api_error, "message", "") or api_error)
-                        )
-                    ):
+                    if _defer_to_copilot_recovery:
                         _retry.copilot_stale_cred_retry_attempted = True
                         if agent._try_recover_stale_copilot_credential():
                             agent._buffer_vprint(

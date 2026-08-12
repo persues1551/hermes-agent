@@ -263,11 +263,14 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.server_error
         assert result.retryable is True
+        assert result.should_fallback is True
 
     def test_502_server_error(self):
         e = MockAPIError("Bad Gateway", status_code=502)
         result = classify_api_error(e)
         assert result.reason == FailoverReason.server_error
+        assert result.retryable is True
+        assert result.should_fallback is True
 
     def test_503_overloaded(self):
         e = MockAPIError("Service Unavailable", status_code=503)
@@ -337,6 +340,24 @@ class TestClassifyApiError:
     # deterministic, so they must NOT be retried — otherwise the retry
     # loop hammers the identical bad request into a flood.
 
+    @pytest.mark.parametrize("status_code", [500, 502])
+    def test_5xx_request_validation_keeps_format_error_path(self, status_code):
+        e = MockAPIError("Unknown parameter: service_tier", status_code=status_code)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.format_error
+        assert result.retryable is False
+        assert result.should_fallback is True
+        assert result.should_compress is False
+
+    @pytest.mark.parametrize("status_code", [500, 502])
+    def test_5xx_empty_response_does_not_compress_or_fallback(self, status_code):
+        e = MockAPIError("Provider returned an empty response", status_code=status_code)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.server_error
+        assert result.retryable is True
+        assert result.should_compress is False
+        assert result.should_fallback is False
+
 
 
 
@@ -347,6 +368,15 @@ class TestClassifyApiError:
     # status instead of the standard 400/413. These must route into the
     # compression-and-retry path, not the blind server_error/overloaded retry
     # that exhausts and drops the turn.
+
+    @pytest.mark.parametrize("status_code", [500, 502])
+    def test_5xx_context_overflow_keeps_compression_path(self, status_code):
+        e = MockAPIError("maximum context length exceeded", status_code=status_code)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.context_overflow
+        assert result.retryable is True
+        assert result.should_compress is True
+        assert result.should_fallback is False
 
 
 

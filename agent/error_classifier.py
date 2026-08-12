@@ -1204,7 +1204,11 @@ def _classify_by_status(
                 retryable=True,
                 should_compress=True,
             )
-        return result_fn(FailoverReason.server_error, retryable=True)
+        return result_fn(
+            FailoverReason.server_error,
+            retryable=True,
+            should_fallback=True,
+        )
 
     if status_code in {503, 529}:
         # Same overflow-as-5xx variant (server busy / model-load OOM, or a
