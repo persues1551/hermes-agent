@@ -64,3 +64,41 @@ def test_openai_base_url_probe_names_the_http_status_instead_of_no_models(monkey
 
     assert out["ok"] is False and out["reachable"] is True
     assert "HTTP 502" in out["message"]
+
+
+def test_cloudflare_browser_integrity_block_is_not_a_bad_key(monkeypatch):
+    """A Cloudflare 1010 block (403 + browser-signature body) must be reported
+    as a client-signature block, not as 'The endpoint rejected the API key'
+    (fork port of the 2026-08-27 dashboard-probe fix)."""
+    import hermes_cli.web_routers.config_env as mod
+    from hermes_cli.web_models import CustomEndpointUpdate
+
+    class _Resp:
+        status_code = 403
+        is_success = False
+        text = "<html><title>Error 1010</title>blocked based on your browser signature</html>"
+
+        def json(self):
+            return {}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(mod, "_endpoint_probe_client", lambda url, timeout: _Client())
+    body = CustomEndpointUpdate(
+        name="Relay", base_url="https://relay.example.com/v1", model="m", api_key="sk-x",
+    )
+    out = asyncio.run(mod.validate_custom_endpoint(body))
+
+    assert out["ok"] is False and out["reachable"] is False
+    assert "1010" in out["message"]

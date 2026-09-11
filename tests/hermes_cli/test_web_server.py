@@ -4931,7 +4931,13 @@ class TestValidateProviderCredential:
         assert data["ok"] is True and data["reachable"] is True
         assert data["models"] == ["gpt-oss-120b"]
         assert captured["url"] == "https://text.example.com/v1/models"
-        assert captured["headers"] == {"Authorization": "Bearer sk-secret"}
+        # Fork port (2026-09-11): every dashboard probe carries a stable UA so
+        # Cloudflare-fronted relays don't BIC-block httpx's default signature.
+        from hermes_cli import __version__
+        assert captured["headers"] == {
+            "User-Agent": f"HermesDashboard/{__version__}",
+            "Authorization": "Bearer sk-secret",
+        }
 
     def test_local_endpoint_without_key_sends_no_auth_header(self, monkeypatch):
         """No key → no Authorization header (keyless local servers unaffected)."""
@@ -4964,7 +4970,10 @@ class TestValidateProviderCredential:
             "/api/providers/validate",
             json={"key": "OPENAI_BASE_URL", "value": "http://127.0.0.1:8000/v1"},
         )
-        assert captured["headers"] is None
+        # Fork port (2026-09-11): keyless probes still carry the dashboard UA —
+        # only the Authorization header is omitted.
+        from hermes_cli import __version__
+        assert captured["headers"] == {"User-Agent": f"HermesDashboard/{__version__}"}
 
     def test_named_custom_endpoint_probe_is_async(self, monkeypatch):
         """Custom endpoint validation must not block the dashboard event loop."""
@@ -5010,10 +5019,13 @@ class TestValidateProviderCredential:
             "message": "",
             "models": ["local-model"],
         }
+        from hermes_cli import __version__
+
         assert captured == {
             "url": "http://localhost:8000/v1/models",
             "headers": {
                 "Accept": "application/json",
+                "User-Agent": f"HermesDashboard/{__version__}",
                 "Authorization": "Bearer local-secret",
             },
         }

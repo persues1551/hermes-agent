@@ -12,6 +12,7 @@ import time
 import urllib.parse
 from fastapi import APIRouter
 from hermes_cli.web_routers._common import http_failure, scoped_to_thread
+from hermes_cli import __version__
 from hermes_cli.web_deps import LateState, late
 from hermes_cli.web_server_config import (
     _apply_main_model_assignment, _denormalize_config_from_web, _normalize_config_for_web, _schema_with_dynamic_provider_options,
@@ -27,6 +28,12 @@ from typing import Any, Dict, List, Optional, Tuple
 _log = logging.getLogger("hermes_cli.web_server")
 config_router = APIRouter()
 router = APIRouter()
+
+# Some OpenAI-compatible relays use Cloudflare Browser Integrity Check and
+# reject httpx's default signature with error 1010. A stable application
+# signature keeps that edge rejection from being mistaken for a bad API key
+# (fork port of the 2026-08-27 dashboard-probe fix, originally in web_server.py).
+_ENDPOINT_PROBE_USER_AGENT = f"HermesDashboard/{__version__}"
 
 # Late-bound so a test's monkeypatch on the owning module wins at call time.
 _channel_managed_env_keys = late("_channel_managed_env_keys", "hermes_cli.web_server_messaging")
@@ -625,7 +632,10 @@ async def validate_custom_endpoint(body: CustomEndpointUpdate):
         return {"ok": False, "reachable": True, "message": "Enter an endpoint URL first.", "models": []}
 
     url = base_url + "/models"
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": _ENDPOINT_PROBE_USER_AGENT,
+    }
     if body.api_key and body.api_key.strip():
         headers["Authorization"] = f"Bearer {body.api_key.strip()}"
 
@@ -635,6 +645,13 @@ async def validate_custom_endpoint(body: CustomEndpointUpdate):
     except Exception:
         return {"ok": False, "reachable": False, "message": f"Could not reach {url}.", "models": []}
 
+    if _is_cloudflare_browser_integrity_block(resp):
+        return {
+            "ok": False,
+            "reachable": False,
+            "message": "The endpoint blocked this client's browser signature (Cloudflare 1010), not the API key.",
+            "models": [],
+        }
     if resp.status_code in (401, 403):
         return {"ok": False, "reachable": True, "message": "The endpoint rejected the API key.", "models": []}
     if not resp.is_success:
@@ -651,6 +668,17 @@ def _endpoint_probe_client(url: str, timeout: float):
     import httpx
     from agent.model_metadata import is_local_endpoint
     return httpx.AsyncClient(timeout=httpx.Timeout(timeout), trust_env=not is_local_endpoint(url))
+
+
+def _is_cloudflare_browser_integrity_block(resp: "Any") -> bool:
+    """Return whether Cloudflare blocked this HTTP client's signature."""
+    if getattr(resp, "status_code", None) != 403:
+        return False
+    try:
+        body = resp.text
+    except Exception:
+        return False
+    return "1010" in body and "browser" in body.lower() and "signature" in body.lower()
 
 
 @router.post("/api/providers/validate")
@@ -678,7 +706,9 @@ async def validate_provider_credential(body: EnvVarUpdate, request: Request):
     if key == "OPENAI_BASE_URL":
         url = value.rstrip("/") + "/models"
         api_key = (body.api_key or "").strip()
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+        headers = {"User-Agent": _ENDPOINT_PROBE_USER_AGENT}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         try:
             async with _endpoint_probe_client(url, 8.0) as client:
                 resp = await client.get(url, headers=headers)
@@ -697,7 +727,10 @@ async def validate_provider_credential(body: EnvVarUpdate, request: Request):
         return {"ok": True, "reachable": False, "message": ""}
 
     url, auth = probe
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": _ENDPOINT_PROBE_USER_AGENT,
+    }
     params = {}
     if auth == "bearer":
         headers["Authorization"] = f"Bearer {value}"
