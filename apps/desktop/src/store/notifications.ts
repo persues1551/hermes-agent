@@ -1,6 +1,7 @@
 import { atom } from 'nanostores'
 
 import { translateNow } from '@/i18n'
+import { isLocalBackendSlotWaitTimeout, requestPoolLimitsSettings } from '@/store/pool-limits'
 
 export type NotificationKind = 'error' | 'warning' | 'info' | 'success'
 
@@ -129,6 +130,10 @@ const ERROR_SUMMARIES: { test: (msg: string) => boolean; summarize: (msg: string
   {
     test: msg => /microphone permission/i.test(msg),
     summarize: () => translateNow('notifications.errors.microphonePermission')
+  },
+  {
+    test: msg => /Restart required:/i.test(msg),
+    summarize: () => translateNow('notifications.errors.codeSkewRestartRequired')
   }
 ]
 
@@ -142,7 +147,9 @@ function summarizeErrorMessage(message: string, fallback: string) {
   return message.length > 180 ? fallback : message || fallback
 }
 
-function readableError(error: unknown, fallback: string): { message: string; detail?: string } {
+// Exported so flows that surface errors inline (e.g. ConfirmDialog's onConfirm
+// rethrow) can reuse the same IPC-unwrapping + summarizing as notifyError.
+export function readableError(error: unknown, fallback: string): { message: string; detail?: string } {
   const raw = error instanceof Error ? error.message : typeof error === 'string' ? error : fallback
   const unwrapped = raw.match(/Error invoking remote method '[^']+': Error: (.+)$/)?.[1] ?? raw
   const cleaned = cleanErrorText(unwrapped)
@@ -189,12 +196,19 @@ export function notify(input: NotificationInput): string {
 
 export function notifyError(error: unknown, fallback: string): string {
   const readable = readableError(error, fallback)
+  const poolSlotTimeout = isLocalBackendSlotWaitTimeout(error)
 
   return notify({
+    action: poolSlotTimeout
+      ? {
+          label: translateNow('desktop.poolSlotTimeoutOpenSettings'),
+          onClick: requestPoolLimitsSettings
+        }
+      : undefined,
     kind: 'error',
     title: fallback,
-    message: readable.message,
-    detail: readable.detail
+    message: poolSlotTimeout ? translateNow('desktop.poolSlotTimeoutBody') : readable.message,
+    detail: poolSlotTimeout ? readable.message : readable.detail
   })
 }
 
