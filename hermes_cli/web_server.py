@@ -135,6 +135,11 @@ except ImportError:
 WEB_DIST = Path(os.environ["HERMES_WEB_DIST"]) if "HERMES_WEB_DIST" in os.environ else Path(__file__).parent / "web_dist"
 _log = logging.getLogger(__name__)
 
+# Some OpenAI-compatible relays use Cloudflare Browser Integrity Check and
+# reject httpx's default signature with error 1010. A stable application
+# signature prevents that edge rejection being mistaken for a bad API key.
+_ENDPOINT_PROBE_USER_AGENT = f"HermesDashboard/{__version__}"
+
 # ---------------------------------------------------------------------------
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
 # and /api/events (dashboard → browser sidebar).  Keyed by an opaque channel id
@@ -7272,6 +7277,17 @@ def _parse_model_ids(resp: "Any") -> List[str]:
     return ids
 
 
+def _is_cloudflare_browser_integrity_block(resp: "Any") -> bool:
+    """Return whether Cloudflare blocked this HTTP client's signature."""
+    if getattr(resp, "status_code", None) != 403:
+        return False
+    try:
+        body = resp.text
+    except Exception:
+        return False
+    return "1010" in body and "browser" in body.lower() and "signature" in body.lower()
+
+
 def _custom_endpoint_id(raw: str, fallback: str = "custom") -> str:
     slug = re.sub(r"[^A-Za-z0-9_-]+", "-", (raw or "").strip()).strip("-_").lower()
     return slug or fallback
@@ -7607,7 +7623,10 @@ async def validate_custom_endpoint(body: CustomEndpointUpdate):
         return {"ok": False, "reachable": True, "message": "Enter an endpoint URL first.", "models": []}
 
     url = base_url + "/models"
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": _ENDPOINT_PROBE_USER_AGENT,
+    }
     if body.api_key and body.api_key.strip():
         headers["Authorization"] = f"Bearer {body.api_key.strip()}"
 
@@ -7617,6 +7636,13 @@ async def validate_custom_endpoint(body: CustomEndpointUpdate):
     except Exception:
         return {"ok": False, "reachable": False, "message": f"Could not reach {url}.", "models": []}
 
+    if _is_cloudflare_browser_integrity_block(resp):
+        return {
+            "ok": False,
+            "reachable": False,
+            "message": "The endpoint blocked this client's browser signature (Cloudflare 1010), not the API key.",
+            "models": [],
+        }
     if resp.status_code in (401, 403):
         return {"ok": False, "reachable": True, "message": "The endpoint rejected the API key.", "models": []}
     if not resp.is_success:
@@ -7652,7 +7678,9 @@ async def validate_provider_credential(body: EnvVarUpdate, request: Request):
         # ``/v1/models`` (many hosted OpenAI-compatible servers) still enumerate
         # their models instead of returning an empty list behind a 401.
         api_key = (body.api_key or "").strip()
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+        headers = {"User-Agent": _ENDPOINT_PROBE_USER_AGENT}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(8.0)) as client:
                 resp = await client.get(url, headers=headers)
@@ -7666,7 +7694,10 @@ async def validate_provider_credential(body: EnvVarUpdate, request: Request):
         return {"ok": True, "reachable": False, "message": ""}
 
     url, auth = probe
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": _ENDPOINT_PROBE_USER_AGENT,
+    }
     params = {}
     if auth == "bearer":
         headers["Authorization"] = f"Bearer {value}"

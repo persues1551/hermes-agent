@@ -4161,7 +4161,10 @@ class TestValidateProviderCredential:
         assert data["ok"] is True and data["reachable"] is True
         assert data["models"] == ["gpt-oss-120b"]
         assert captured["url"] == "https://text.example.com/v1/models"
-        assert captured["headers"] == {"Authorization": "Bearer sk-secret"}
+        assert captured["headers"] == {
+            "User-Agent": "HermesDashboard/0.20.0",
+            "Authorization": "Bearer sk-secret",
+        }
 
     def test_local_endpoint_without_key_sends_no_auth_header(self, monkeypatch):
         """No key → no Authorization header (keyless local servers unaffected)."""
@@ -4194,7 +4197,7 @@ class TestValidateProviderCredential:
             "/api/providers/validate",
             json={"key": "OPENAI_BASE_URL", "value": "http://127.0.0.1:8000/v1"},
         )
-        assert captured["headers"] is None
+        assert captured["headers"] == {"User-Agent": "HermesDashboard/0.20.0"}
 
     def test_named_custom_endpoint_probe_is_async(self, monkeypatch):
         """Custom endpoint validation must not block the dashboard event loop."""
@@ -4244,6 +4247,7 @@ class TestValidateProviderCredential:
             "url": "http://localhost:8000/v1/models",
             "headers": {
                 "Accept": "application/json",
+                "User-Agent": "HermesDashboard/0.20.0",
                 "Authorization": "Bearer local-secret",
             },
         }
