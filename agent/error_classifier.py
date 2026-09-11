@@ -379,6 +379,14 @@ _V_SSL_CERT = _v(_R.ssl_cert_verification, retryable=False)
 _V_CONTEXT_OVERFLOW = _v(_R.context_overflow, should_compress=True)
 _V_PAYLOAD_TOO_LARGE = _v(_R.payload_too_large, should_compress=True)
 _V_OVERLOADED, _V_SERVER_ERROR, _V_TIMEOUT, _V_UNKNOWN = map(_v, (_R.overloaded, _R.server_error, _R.timeout, _R.unknown))
+# Local fork port (2026-09-11, from bd55032f8): a plain relay 500/502 with no
+# request-validation or overflow signal is an upstream bad window — mark it
+# should_fallback so the eager-fallback gate in turn_recovery switches
+# providers on the first failure instead of burning the whole retry budget on
+# a dead upstream (MaiTokens 502 windows, 2026-08-12). Deliberately separate
+# from the shared ``_V_SERVER_ERROR`` so the empty-response and
+# server-injected-parameter 5xx paths keep ``should_fallback=False``.
+_V_SERVER_ERROR_FALLBACK = _v(_R.server_error, should_fallback=True)
 _V_IMAGE_TOO_LARGE, _V_IMAGE_CORRUPT = _v(_R.image_too_large), _v(_R.image_corrupt)
 _V_MULTIMODAL, _V_INVALID_ENCRYPTED = _v(_R.multimodal_tool_content_unsupported), _v(_R.invalid_encrypted_content)
 _V_REASONING_MANDATORY = _v(_R.reasoning_mandatory, should_compress=False, should_fallback=False)
@@ -738,7 +746,8 @@ def _status_5xx(c: _Ctx) -> Verdict:
     validation = any(p in c.msg for p in _REQUEST_VALIDATION_PATTERNS) or c.code in _5XX_VALIDATION_CODES
     if validation and not _is_server_injected_param_rejection(c.msg, c.provider_slug):
         return _V_FORMAT_ERROR
-    return _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_SERVER_ERROR
+    # Tail = plain upstream 5xx: arm the eager fallback (fork port, bd55032f8).
+    return _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_SERVER_ERROR_FALLBACK
 
 
 def _classify_402(error_msg: str, result_fn: Callable[..., Any]) -> Any:

@@ -453,11 +453,38 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.server_error
         assert result.retryable is True
+        # Local fork port (bd55032f8): a plain 500/502 arms the eager
+        # fallback gate in turn_recovery.route_classified_error.
+        assert result.should_fallback is True
 
     def test_502_server_error(self):
         e = MockAPIError("Bad Gateway", status_code=502)
         result = classify_api_error(e)
         assert result.reason == FailoverReason.server_error
+        assert result.retryable is True
+        assert result.should_fallback is True
+
+    @pytest.mark.parametrize("status_code", [500, 502])
+    def test_5xx_empty_response_does_not_arm_eager_fallback(self, status_code):
+        """Empty-response advisories ride the 5xx path but must not trigger the
+        eager provider switch (fork-port guard, bd55032f8)."""
+        e = MockAPIError("Provider returned an empty response", status_code=status_code)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.server_error
+        assert result.retryable is True
+        assert result.should_compress is False
+        assert result.should_fallback is False
+
+    @pytest.mark.parametrize("status_code", [500, 502])
+    def test_5xx_context_overflow_keeps_the_compression_path(self, status_code):
+        """Overflow-as-5xx (llama.cpp) must compress, not switch providers
+        (fork-port guard, bd55032f8)."""
+        e = MockAPIError("maximum context length exceeded", status_code=status_code)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.context_overflow
+        assert result.retryable is True
+        assert result.should_compress is True
+        assert result.should_fallback is False
 
     def test_503_overloaded(self):
         e = MockAPIError("Service Unavailable", status_code=503)
@@ -1710,6 +1737,9 @@ class TestServerInjectedParameterRejection:
         result = classify_api_error(e, provider="custom", model="m")
         assert result.reason == FailoverReason.format_error
         assert result.retryable is False
+        # Validation-as-5xx already carried should_fallback before the fork
+        # port (bd55032f8) — it must keep it.
+        assert result.should_fallback is True
 
 
 

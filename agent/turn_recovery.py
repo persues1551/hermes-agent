@@ -1272,6 +1272,8 @@ def _eager_fallback_status(classified: Any, is_upstream: bool, is_transport_fail
                 "— switching to fallback provider..."
             )
         return "⚠️ Billing or credits exhausted — switching to fallback provider..."
+    if classified.reason == FailoverReason.server_error:
+        return "⚠️ Upstream server error — switching to fallback provider..."
     if is_transport_failure:
         return "⚠️ Provider unreachable — switching to fallback provider..."
     return "⚠️ Rate limited — switching to fallback provider..."
@@ -1428,17 +1430,30 @@ def route_classified_error(
     _is_zai_coding_overload = is_zai_coding_overload_error(base_url=str(base_url), model=model, error=api_error)
     if _is_zai_coding_overload:
         max_retries = max(max_retries, zai_coding_overload_retry_ceiling())
+    # Local fork port (2026-09-11, from bd55032f8): a relay/upstream 500/502 —
+    # classified ``server_error`` + ``should_fallback`` by the ``_status_5xx``
+    # tail — switches providers on the first failure. Retry-then-fallback burns
+    # the entire retry budget on a dead upstream (MaiTokens 502 windows,
+    # 2026-08-12). Deliberately narrow: the empty-response and 5xx
+    # request-validation paths never set both flags together.
+    _eager_server_error = (
+        classified.reason == FailoverReason.server_error and classified.should_fallback
+    )
     _should_fallback = (
         (is_rate_limited and _wrapped_output_cap_budget is None)
         or (_is_transport_failure and retry_count >= 2)
+        or _eager_server_error
     )
     if _should_fallback and agent._fallback_index < len(agent._fallback_chain):
-        # No eager fallback while credential pool rotation may recover. Exception: an
-        # upstream-aggregator 429 — the pool can't help, always fall back.
+        # No eager fallback while credential pool rotation may recover. Exceptions: an
+        # upstream-aggregator 429, and a plain 500/502 server error — a credential swap
+        # cannot recover an upstream bad window (local port of bd55032f8).
         # Fixes #11314.
         _is_upstream = classified.reason == FailoverReason.upstream_rate_limit
         pool_may_recover = (
-            False if _is_upstream else _ra()._pool_may_recover_from_rate_limit(agent._credential_pool)
+            False
+            if (_is_upstream or _eager_server_error)
+            else _ra()._pool_may_recover_from_rate_limit(agent._credential_pool)
         )
         if not pool_may_recover:
             agent._buffer_status(_eager_fallback_status(classified, _is_upstream, _is_transport_failure))
